@@ -8,6 +8,9 @@
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <SPI.h>
 
 // ============================================================
 // PIN DEFINITIONS
@@ -28,8 +31,16 @@ const int buzzerPin = 23;
 // Temperature sensor pin (DS18B20)
 #define ONE_WIRE_BUS 22
 
+// TFT Display pins (ST7789 240x240)
+// Remapped to avoid conflicts with buttons (2,4), buzzer (23)
+#define TFT_CS    -1  // pin BLK
+#define TFT_DC    5   // pin DC
+#define TFT_RST   19  // pin RES
+#define TFT_MOSI  21  // pin SDA
+#define TFT_SCLK  18  // pin SCL
+
 // ============================================================
-// SENSOR INSTANCES
+// DISPLAY & SENSOR INSTANCES
 // ============================================================
 
 // Setup OneWire instance to communicate with DS18B20
@@ -37,6 +48,9 @@ OneWire oneWire(ONE_WIRE_BUS);
 
 // Pass OneWire reference to DallasTemperature library
 DallasTemperature tempSensor(&oneWire);
+
+// ST7789 TFT display instance
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 
 // ============================================================
 // BUZZER NOTE FREQUENCIES
@@ -79,6 +93,11 @@ float temperature = 0.0;
 unsigned long previousTempMillis = 0;
 const int tempInterval = 2000;
 
+// Display
+float gearAngle = 0;       // Current gear rotation angle (degrees)
+unsigned long previousDisplayMillis = 0;
+const int displayInterval = 250;  // Update display every 250ms
+
 // ============================================================
 // INTERRUPT SERVICE ROUTINE
 // ============================================================
@@ -118,6 +137,12 @@ void setup() {
   // Initialize temperature sensor
   tempSensor.begin();
 
+  // Initialize TFT display
+  SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
+  tft.init(240, 240, SPI_MODE3);
+  tft.setRotation(2);
+  tft.fillScreen(ST77XX_BLACK);
+
   Serial.println("FC-03 Speed Sensor Initialized.");
   Serial.println("DS18B20 Temperature Sensor Initialized.");
   Serial.println("All systems ready.");
@@ -132,6 +157,7 @@ void loop() {
   handleSpeedSensor();
   handleTemperature();
   handleBuzzer();
+  updateDisplay();
 }
 
 // ============================================================
@@ -279,5 +305,182 @@ void handleBuzzer() {
     }
 
     startupMelodyPlayed = true;
+  }
+}
+
+// ============================================================
+// DISPLAY FUNCTIONS
+// ============================================================
+
+// Draw a rotating gear icon at (cx, cy) with given radius and number of teeth
+// Gear rotates based on gearAngle (in degrees)
+void drawGear(int cx, int cy, int outerR, int innerR, int teeth, float angle, uint16_t color) {
+  float step = 360.0 / teeth;
+  float halfTooth = step * 0.3;
+
+  for (int i = 0; i < teeth; i++) {
+    float baseAngle = angle + i * step;
+    float a1 = radians(baseAngle - halfTooth);
+    float a2 = radians(baseAngle + halfTooth);
+
+    // Outer tooth rectangle (two triangles approximating a trapezoid)
+    int x1 = cx + cos(a1) * innerR;
+    int y1 = cy + sin(a1) * innerR;
+    int x2 = cx + cos(a1) * outerR;
+    int y2 = cy + sin(a1) * outerR;
+    int x3 = cx + cos(a2) * outerR;
+    int y3 = cy + sin(a2) * outerR;
+    int x4 = cx + cos(a2) * innerR;
+    int y4 = cy + sin(a2) * innerR;
+
+    tft.fillTriangle(x1, y1, x2, y2, x3, y3, color);
+    tft.fillTriangle(x1, y1, x3, y3, x4, y4, color);
+  }
+
+  // Center hub circle
+  tft.fillCircle(cx, cy, innerR - 1, color);
+
+  // Center hole (dark)
+  tft.fillCircle(cx, cy, 4, ST77XX_BLACK);
+}
+
+// Draw a thermometer icon at (cx, cy) with mercury level based on temperature
+void drawThermometer(int cx, int cy, float temp, uint16_t color) {
+  // Bulb at bottom
+  tft.fillCircle(cx, cy + 12, 6, color);
+  tft.fillCircle(cx, cy + 12, 4, ST77XX_BLACK);  // hollow center
+
+  // Tube
+  tft.fillRect(cx - 3, cy - 18, 6, 30, color);
+
+  // Clear inside of tube (mercury area will be filled separately)
+  tft.fillRect(cx - 1, cy - 16, 2, 24, ST77XX_BLACK);
+
+  // Mercury fill — map temperature range 0-100°C to fill height
+  int fillH = map(constrain((int)temp, 0, 100), 0, 100, 0, 22);
+  int mercuryColor = ST77XX_RED;
+  if (temp < 30) mercuryColor = 0x07FF;       // Cyan for cool
+  else if (temp < 60) mercuryColor = ST77XX_YELLOW; // Yellow for warm
+  else mercuryColor = ST77XX_RED;              // Red for hot
+
+  tft.fillRect(cx - 1, cy + 6 - fillH, 2, fillH, mercuryColor);
+  tft.fillCircle(cx, cy + 12, 4, mercuryColor);
+
+  // Tick marks on right side
+  for (int i = 0; i < 4; i++) {
+    int yTick = cy + 6 - i * 6;
+    tft.drawPixel(cx + 4, yTick, ST77XX_WHITE);
+    tft.drawPixel(cx + 5, yTick, ST77XX_WHITE);
+  }
+}
+
+// Separator line across the display
+void drawSeparator(int y) {
+  tft.drawFastHLine(5, y, 230, 0x7BEF);  // Dim gray line
+}
+
+// Main display update — called every displayInterval ms
+void updateDisplay() {
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousDisplayMillis < displayInterval) return;
+  previousDisplayMillis = currentMillis;
+
+  // Clear screen
+  tft.fillScreen(ST77XX_BLACK);
+
+  // ---- Title ----
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(5, 3);
+  tft.print("MACERATION CONTROLLER");
+
+  // ---- RPM Section ----
+  // Rotating gear icon (rotation speed proportional to RPM)
+  // Gear rotates faster at higher RPM
+  float rpmFactor = (rpm > 0) ? (float)rpm / 300.0 : 0;
+  gearAngle += rpmFactor * 30;  // 30 degrees per update at 300 RPM
+  if (gearAngle >= 360) gearAngle -= 360;
+
+  uint16_t rpmColor = (rpm > 0) ? ST77XX_CYAN : 0x7BEF;  // Bright if spinning, dim if stopped
+  drawGear(22, 28, 14, 9, 6, gearAngle, rpmColor);
+
+  // RPM label and value
+  tft.setTextSize(1);
+  tft.setTextColor(rpmColor);
+  tft.setCursor(40, 18);
+  tft.print("RPM");
+
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(40, 28);
+  char rpmBuf[8];
+  sprintf(rpmBuf, "%d", rpm);
+  tft.print(rpmBuf);
+
+  // ---- Separator ----
+  drawSeparator(55);
+
+  // ---- Temperature Section ----
+  drawThermometer(22, 72, temperature, ST77XX_WHITE);
+
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setCursor(40, 62);
+  tft.print("TEMP");
+
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(40, 72);
+  char tempBuf[10];
+  dtostrf(temperature, 1, 1, tempBuf);
+  tft.print(tempBuf);
+  tft.setTextSize(1);
+  tft.print(" ");
+  tft.print((char)247);  // ° symbol
+  tft.print("C");
+
+  // ---- Separator ----
+  drawSeparator(100);
+
+  // ---- Relay Status Section (2x2 grid) ----
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(5, 105);
+  tft.print("RELAYS");
+
+  uint16_t onColor  = 0x07E0;   // Green
+  uint16_t offColor = 0x7BEF;   // Dim gray
+  const char* relayLabels[] = {"R1", "R2", "R3", "R4"};
+
+  for (int i = 0; i < 4; i++) {
+    int col = i % 2;
+    int row = i / 2;
+    int x = 10 + col * 115;
+    int y = 120 + row * 50;
+
+    uint16_t bgColor = relayState[i] ? 0x0400 : 0x2104;  // Dark green bg if ON, dark bg if OFF
+    tft.fillRoundRect(x, y, 105, 40, 5, bgColor);
+    tft.drawRoundRect(x, y, 105, 40, 5, relayState[i] ? onColor : offColor);
+
+    // Relay label
+    tft.setTextColor(relayState[i] ? onColor : offColor);
+    tft.setTextSize(1);
+    tft.setCursor(x + 5, y + 5);
+    tft.print(relayLabels[i]);
+
+    // Status dot
+    tft.fillCircle(x + 28, y + 12, 4, relayState[i] ? onColor : offColor);
+
+    // ON/OFF text
+    tft.setTextSize(2);
+    tft.setCursor(x + 38, y + 5);
+    tft.print(relayState[i] ? "ON" : "OFF");
+
+    // Pin info
+    tft.setTextSize(1);
+    tft.setTextColor(offColor);
+    tft.setCursor(x + 5, y + 24);
+    tft.print("Pin ");
+    tft.print(relayPins[i]);
   }
 }
