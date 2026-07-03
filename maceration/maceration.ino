@@ -97,6 +97,15 @@ const int tempInterval = 2000;
 float gearAngle = 0;       // Current gear rotation angle (degrees)
 unsigned long previousDisplayMillis = 0;
 const int displayInterval = 250;  // Update display every 250ms
+bool displayFirstDraw = true;     // First frame: draw static layout
+
+// Display region Y coordinates (prevents overlap)
+#define DISPLAY_RPM_Y    15
+#define DISPLAY_RPM_H    37
+#define DISPLAY_TEMP_Y   58
+#define DISPLAY_TEMP_H   37
+#define DISPLAY_RELAY_Y  115
+#define DISPLAY_RELAY_H  120
 
 // ============================================================
 // INTERRUPT SERVICE ROUTINE
@@ -134,8 +143,10 @@ void setup() {
   // Attach interrupt for speed sensor
   attachInterrupt(digitalPinToInterrupt(SENSOR_PIN), countPulse, FALLING);
 
-  // Initialize temperature sensor
+  // Initialize temperature sensor (non-blocking mode — don't wait for conversion)
   tempSensor.begin();
+  tempSensor.setWaitForConversion(false);
+  tempSensor.requestTemperatures();  // Kick off first conversion immediately
 
   // Initialize TFT display
   SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
@@ -262,16 +273,16 @@ void handleTemperature() {
   unsigned long currentMillis = millis();
 
   if (currentMillis - previousTempMillis >= tempInterval) {
-    // Request temperature reading from DS18B20
-    tempSensor.requestTemperatures();
-
-    // Read temperature in Celsius
+    // Read the result from the PREVIOUS request (non-blocking)
     temperature = tempSensor.getTempCByIndex(0);
 
     // Print results
     Serial.print("Temperature: ");
     Serial.print(temperature);
     Serial.println(" °C");
+
+    // Kick off the NEXT conversion (returns immediately, conversion happens in background)
+    tempSensor.requestTemperatures();
 
     // Update timer
     previousTempMillis = currentMillis;
@@ -379,32 +390,57 @@ void drawSeparator(int y) {
   tft.drawFastHLine(5, y, 230, 0x7BEF);  // Dim gray line
 }
 
-// Main display update — called every displayInterval ms
-void updateDisplay() {
-  unsigned long currentMillis = millis();
-  if (currentMillis - previousDisplayMillis < displayInterval) return;
-  previousDisplayMillis = currentMillis;
+// Clear only a specific rectangular region (instead of full screen)
+void clearRegion(int x, int y, int w, int h) {
+  tft.fillRect(x, y, w, h, ST77XX_BLACK);
+}
 
-  // Clear screen
+// Draw static layout elements (title + separators) — called once
+void drawStaticLayout() {
   tft.fillScreen(ST77XX_BLACK);
 
-  // ---- Title ----
+  // Title
   tft.setTextSize(1);
   tft.setTextColor(ST77XX_WHITE);
   tft.setCursor(5, 3);
   tft.print("MACERATION CONTROLLER");
 
-  // ---- RPM Section ----
-  // Rotating gear icon (rotation speed proportional to RPM)
-  // Gear rotates faster at higher RPM
+  // Separators
+  drawSeparator(55);
+  drawSeparator(100);
+
+  // Relay section header
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(5, 105);
+  tft.print("RELAYS");
+}
+
+// Main display update — called every displayInterval ms
+// Uses dirty-region approach: only redraws the zones that changed,
+// never does a full fillScreen after the first frame.
+void updateDisplay() {
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousDisplayMillis < displayInterval) return;
+  previousDisplayMillis = currentMillis;
+
+  // First frame: draw the static layout once
+  if (displayFirstDraw) {
+    drawStaticLayout();
+    displayFirstDraw = false;
+  }
+
+  // ---- RPM Section (clear only RPM zone: y=15 to y=52) ----
+  clearRegion(0, DISPLAY_RPM_Y, 240, DISPLAY_RPM_H);
+
+  // Rotating gear icon (speed proportional to RPM)
   float rpmFactor = (rpm > 0) ? (float)rpm / 300.0 : 0;
-  gearAngle += rpmFactor * 30;  // 30 degrees per update at 300 RPM
+  gearAngle += rpmFactor * 30;
   if (gearAngle >= 360) gearAngle -= 360;
 
-  uint16_t rpmColor = (rpm > 0) ? ST77XX_CYAN : 0x7BEF;  // Bright if spinning, dim if stopped
+  uint16_t rpmColor = (rpm > 0) ? ST77XX_CYAN : 0x7BEF;
   drawGear(22, 28, 14, 9, 6, gearAngle, rpmColor);
 
-  // RPM label and value
   tft.setTextSize(1);
   tft.setTextColor(rpmColor);
   tft.setCursor(40, 18);
@@ -417,10 +453,9 @@ void updateDisplay() {
   sprintf(rpmBuf, "%d", rpm);
   tft.print(rpmBuf);
 
-  // ---- Separator ----
-  drawSeparator(55);
+  // ---- Temperature Section (clear only temp zone: y=58 to y=95) ----
+  clearRegion(0, DISPLAY_TEMP_Y, 240, DISPLAY_TEMP_H);
 
-  // ---- Temperature Section ----
   drawThermometer(22, 72, temperature, ST77XX_WHITE);
 
   tft.setTextSize(1);
@@ -439,14 +474,8 @@ void updateDisplay() {
   tft.print((char)247);  // ° symbol
   tft.print("C");
 
-  // ---- Separator ----
-  drawSeparator(100);
-
-  // ---- Relay Status Section (2x2 grid) ----
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(5, 105);
-  tft.print("RELAYS");
+  // ---- Relay Status Section (clear only relay zone: y=115 to y=235) ----
+  clearRegion(0, DISPLAY_RELAY_Y, 240, DISPLAY_RELAY_H);
 
   uint16_t onColor  = 0x07E0;   // Green
   uint16_t offColor = 0x7BEF;   // Dim gray
@@ -458,25 +487,21 @@ void updateDisplay() {
     int x = 10 + col * 115;
     int y = 120 + row * 50;
 
-    uint16_t bgColor = relayState[i] ? 0x0400 : 0x2104;  // Dark green bg if ON, dark bg if OFF
+    uint16_t bgColor = relayState[i] ? 0x0400 : 0x2104;
     tft.fillRoundRect(x, y, 105, 40, 5, bgColor);
     tft.drawRoundRect(x, y, 105, 40, 5, relayState[i] ? onColor : offColor);
 
-    // Relay label
     tft.setTextColor(relayState[i] ? onColor : offColor);
     tft.setTextSize(1);
     tft.setCursor(x + 5, y + 5);
     tft.print(relayLabels[i]);
 
-    // Status dot
     tft.fillCircle(x + 28, y + 12, 4, relayState[i] ? onColor : offColor);
 
-    // ON/OFF text
     tft.setTextSize(2);
     tft.setCursor(x + 38, y + 5);
     tft.print(relayState[i] ? "ON" : "OFF");
 
-    // Pin info
     tft.setTextSize(1);
     tft.setTextColor(offColor);
     tft.setCursor(x + 5, y + 24);
