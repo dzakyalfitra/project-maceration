@@ -81,6 +81,11 @@ const unsigned long debounceDelay = 50;
 // Buzzer timing
 bool startupMelodyPlayed = false;
 
+// Non-blocking beep state
+bool beepActive = false;
+unsigned long beepStartTime = 0;
+const unsigned long beepDuration = 80;
+
 // Speed sensor
 volatile unsigned int pulseCount = 0;
 unsigned int rpm = 0;
@@ -96,8 +101,13 @@ const int tempInterval = 2000;
 // Display
 float gearAngle = 0;       // Current gear rotation angle (degrees)
 unsigned long previousDisplayMillis = 0;
-const int displayInterval = 250;  // Update display every 250ms
+const int displayInterval = 150;  // Update display every 150ms
 bool displayFirstDraw = true;     // First frame: draw static layout
+
+// Change-detection: track last drawn values to avoid redundant redraws
+unsigned int lastDrawnRpm = 0xFFFFFFFF;
+float lastDrawnTemp = -999.0;
+bool lastDrawnRelay[4] = {false, false, false, false};
 
 // Display region Y coordinates (prevents overlap)
 #define DISPLAY_RPM_Y    15
@@ -168,6 +178,7 @@ void loop() {
   handleSpeedSensor();
   handleTemperature();
   handleBuzzer();
+  handleBeep();
   updateDisplay();
 }
 
@@ -223,10 +234,10 @@ void toggleRelay(int index) {
   // Apply to physical relay (active-LOW logic)
   digitalWrite(relayPins[index], relayState[index] ? LOW : HIGH);
 
-  // Play button press beep (single note)
+  // Start non-blocking beep (handled by handleBeep in main loop)
+  beepActive = true;
+  beepStartTime = millis();
   tone(buzzerPin, 1000);
-  delay(100);
-  noTone(buzzerPin);
 
   // Print state change to Serial
   Serial.print("Relay ");
@@ -316,6 +327,17 @@ void handleBuzzer() {
     }
 
     startupMelodyPlayed = true;
+  }
+}
+
+// ============================================================
+// NON-BLOCKING BEEP HANDLER
+// ============================================================
+
+void handleBeep() {
+  if (beepActive && (millis() - beepStartTime >= beepDuration)) {
+    noTone(buzzerPin);
+    beepActive = false;
   }
 }
 
@@ -417,95 +439,131 @@ void drawStaticLayout() {
 }
 
 // Main display update — called every displayInterval ms
-// Uses dirty-region approach: only redraws the zones that changed,
-// never does a full fillScreen after the first frame.
+// Change-detection: only redraws zones whose data actually changed.
+// When nothing changes, zero SPI traffic = zero flicker.
 void updateDisplay() {
   unsigned long currentMillis = millis();
   if (currentMillis - previousDisplayMillis < displayInterval) return;
   previousDisplayMillis = currentMillis;
 
-  // First frame: draw the static layout once
+  // First frame: draw the complete static layout
   if (displayFirstDraw) {
     drawStaticLayout();
     displayFirstDraw = false;
+    lastDrawnRpm = rpm;
+    lastDrawnTemp = temperature;
+    for (int i = 0; i < 4; i++) lastDrawnRelay[i] = relayState[i];
+    // Draw first frame of all sections (force all flags true)
+    drawSections(true, true, true);
+    return;
   }
 
-  // ---- RPM Section (clear only RPM zone: y=15 to y=52) ----
-  clearRegion(0, DISPLAY_RPM_Y, 240, DISPLAY_RPM_H);
-
-  // Rotating gear icon (speed proportional to RPM)
-  float rpmFactor = (rpm > 0) ? (float)rpm / 300.0 : 0;
-  gearAngle += rpmFactor * 30;
-  if (gearAngle >= 360) gearAngle -= 360;
-
-  uint16_t rpmColor = (rpm > 0) ? ST77XX_CYAN : 0x7BEF;
-  drawGear(22, 28, 14, 9, 6, gearAngle, rpmColor);
-
-  tft.setTextSize(1);
-  tft.setTextColor(rpmColor);
-  tft.setCursor(40, 18);
-  tft.print("RPM");
-
-  tft.setTextSize(2);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(40, 28);
-  char rpmBuf[8];
-  sprintf(rpmBuf, "%d", rpm);
-  tft.print(rpmBuf);
-
-  // ---- Temperature Section (clear only temp zone: y=58 to y=95) ----
-  clearRegion(0, DISPLAY_TEMP_Y, 240, DISPLAY_TEMP_H);
-
-  drawThermometer(22, 72, temperature, ST77XX_WHITE);
-
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_YELLOW);
-  tft.setCursor(40, 62);
-  tft.print("TEMP");
-
-  tft.setTextSize(2);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(40, 72);
-  char tempBuf[10];
-  dtostrf(temperature, 1, 1, tempBuf);
-  tft.print(tempBuf);
-  tft.setTextSize(1);
-  tft.print(" ");
-  tft.print((char)247);  // ° symbol
-  tft.print("C");
-
-  // ---- Relay Status Section (clear only relay zone: y=115 to y=235) ----
-  clearRegion(0, DISPLAY_RELAY_Y, 240, DISPLAY_RELAY_H);
-
-  uint16_t onColor  = 0x07E0;   // Green
-  uint16_t offColor = 0x7BEF;   // Dim gray
-  const char* relayLabels[] = {"R1", "R2", "R3", "R4"};
-
+  // ---- Check what changed ----
+  bool rpmChanged   = (rpm != lastDrawnRpm) || (rpm > 0);  // gear always animates if rpm>0
+  bool tempChanged   = (temperature != lastDrawnTemp);
+  bool relayChanged  = false;
   for (int i = 0; i < 4; i++) {
-    int col = i % 2;
-    int row = i / 2;
-    int x = 10 + col * 115;
-    int y = 120 + row * 50;
+    if (relayState[i] != lastDrawnRelay[i]) {
+      relayChanged = true;
+      break;
+    }
+  }
 
-    uint16_t bgColor = relayState[i] ? 0x0400 : 0x2104;
-    tft.fillRoundRect(x, y, 105, 40, 5, bgColor);
-    tft.drawRoundRect(x, y, 105, 40, 5, relayState[i] ? onColor : offColor);
+  // Nothing changed and rpm is 0 — skip entirely
+  if (!rpmChanged && !tempChanged && !relayChanged) return;
 
-    tft.setTextColor(relayState[i] ? onColor : offColor);
+  drawSections(rpmChanged, tempChanged, relayChanged);
+}
+
+// Draw the three display sections, only those whose flag is true
+void drawSections(bool doRpm, bool doTemp, bool doRelay) {
+  // ---- RPM Section ----
+  if (doRpm) {
+    clearRegion(0, DISPLAY_RPM_Y, 240, DISPLAY_RPM_H);
+
+    float rpmFactor = (rpm > 0) ? (float)rpm / 300.0 : 0;
+    gearAngle += rpmFactor * 30;
+    if (gearAngle >= 360) gearAngle -= 360;
+
+    uint16_t rpmColor = (rpm > 0) ? ST77XX_CYAN : 0x7BEF;
+    drawGear(22, 28, 14, 9, 6, gearAngle, rpmColor);
+
     tft.setTextSize(1);
-    tft.setCursor(x + 5, y + 5);
-    tft.print(relayLabels[i]);
-
-    tft.fillCircle(x + 28, y + 12, 4, relayState[i] ? onColor : offColor);
+    tft.setTextColor(rpmColor);
+    tft.setCursor(40, 18);
+    tft.print("RPM");
 
     tft.setTextSize(2);
-    tft.setCursor(x + 38, y + 5);
-    tft.print(relayState[i] ? "ON" : "OFF");
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setCursor(40, 28);
+    char rpmBuf[8];
+    sprintf(rpmBuf, "%d", rpm);
+    tft.print(rpmBuf);
+
+    lastDrawnRpm = rpm;
+  }
+
+  // ---- Temperature Section ----
+  if (doTemp) {
+    clearRegion(0, DISPLAY_TEMP_Y, 240, DISPLAY_TEMP_H);
+
+    drawThermometer(22, 72, temperature, ST77XX_WHITE);
 
     tft.setTextSize(1);
-    tft.setTextColor(offColor);
-    tft.setCursor(x + 5, y + 24);
-    tft.print("Pin ");
-    tft.print(relayPins[i]);
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.setCursor(40, 62);
+    tft.print("TEMP");
+
+    tft.setTextSize(2);
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setCursor(40, 72);
+    char tempBuf[10];
+    dtostrf(temperature, 1, 1, tempBuf);
+    tft.print(tempBuf);
+    tft.setTextSize(1);
+    tft.print(" ");
+    tft.print((char)247);  // ° symbol
+    tft.print("C");
+
+    lastDrawnTemp = temperature;
+  }
+
+  // ---- Relay Status Section ----
+  if (doRelay) {
+    clearRegion(0, DISPLAY_RELAY_Y, 240, DISPLAY_RELAY_H);
+
+    uint16_t onColor  = 0x07E0;   // Green
+    uint16_t offColor = 0x7BEF;   // Dim gray
+    const char* relayLabels[] = {"R1", "R2", "R3", "R4"};
+
+    for (int i = 0; i < 4; i++) {
+      int col = i % 2;
+      int row = i / 2;
+      int x = 10 + col * 115;
+      int y = 120 + row * 50;
+
+      uint16_t bgColor = relayState[i] ? 0x0400 : 0x2104;
+      tft.fillRoundRect(x, y, 105, 40, 5, bgColor);
+      tft.drawRoundRect(x, y, 105, 40, 5, relayState[i] ? onColor : offColor);
+
+      tft.setTextColor(relayState[i] ? onColor : offColor);
+      tft.setTextSize(1);
+      tft.setCursor(x + 5, y + 5);
+      tft.print(relayLabels[i]);
+
+      tft.fillCircle(x + 28, y + 12, 4, relayState[i] ? onColor : offColor);
+
+      tft.setTextSize(2);
+      tft.setCursor(x + 38, y + 5);
+      tft.print(relayState[i] ? "ON" : "OFF");
+
+      tft.setTextSize(1);
+      tft.setTextColor(offColor);
+      tft.setCursor(x + 5, y + 24);
+      tft.print("Pin ");
+      tft.print(relayPins[i]);
+
+      lastDrawnRelay[i] = relayState[i];
+    }
   }
 }
