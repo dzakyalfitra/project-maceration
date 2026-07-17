@@ -94,9 +94,10 @@ const int interval = 1000;
 const int slotsOnDisk = 20;
 
 // Temperature sensor
-float temperature = 0.0;
+float temperature = -127.0;
 unsigned long previousTempMillis = 0;
 const int tempInterval = 2000;
+bool tempFirstRead = true;
 
 // Display
 float gearAngle = 0;       // Current gear rotation angle (degrees)
@@ -285,9 +286,13 @@ void handleTemperature() {
 
   if (currentMillis - previousTempMillis >= tempInterval) {
     // Read the result from the PREVIOUS request (non-blocking)
-    temperature = tempSensor.getTempCByIndex(0);
+    float t = tempSensor.getTempCByIndex(0);
 
-    // Print results
+    if (t != DEVICE_DISCONNECTED_C) {
+      temperature = t;
+    }
+
+    // Print results (only on change)
     Serial.print("Temperature: ");
     Serial.print(temperature);
     Serial.println(" °C");
