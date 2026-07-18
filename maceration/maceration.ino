@@ -17,7 +17,10 @@
 // ============================================================
 
 // Relay pins (active-LOW: LOW=ON, HIGH=OFF)
-const int relayPins[4] = {13, 12, 27, 26};
+// 3 relays — IN1, IN2, IN3. GPIO12 is intentionally avoided:
+// it's a strapping pin and the relay module's pull-up would prevent ESP32 boot.
+// Also disconnect GPIO12 from the relay module on the hardware side.
+const int relayPins[3] = {27, 26, 13};
 
 // Button pins (INPUT_PULLUP mode: active-LOW, connect to GND when pressed)
 const int buttonPins[4] = {15, 4, 16, 17};  
@@ -70,7 +73,7 @@ Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 // ============================================================
 
 // Relay state tracking (true = ON/LOW, false = OFF/HIGH)
-bool relayState[4] = {false, false, false, false};
+bool relayState[3] = {false, false, false};
 
 // Button state tracking
 const char* buttonLabels[4] = {"S1", "S2", "S3", "S4"};
@@ -109,7 +112,7 @@ bool displayFirstDraw = true;     // First frame: draw static layout
 // Change-detection: track last drawn values to avoid redundant redraws
 unsigned int lastDrawnRpm = 0xFFFFFFFF;
 float lastDrawnTemp = -999.0;
-bool lastDrawnRelay[4] = {false, false, false, false};
+bool lastDrawnRelay[3] = {false, false, false};
 
 // Display region Y coordinates (prevents overlap)
 #define DISPLAY_RPM_Y    15
@@ -135,7 +138,7 @@ void setup() {
   Serial.begin(115200);
 
   // Configure relay pins as outputs, initialize to OFF (HIGH)
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 3; i++) {
     pinMode(relayPins[i], OUTPUT);
     digitalWrite(relayPins[i], HIGH);
   }
@@ -203,7 +206,8 @@ void handleButtons() {
           Serial.print("[");
           Serial.print(buttonLabels[i]);
           Serial.println("] PRESSED");
-          toggleRelay(i);
+          if (i == 3) toggleAllRelays();
+          else        toggleRelay(i);
         } else {
           Serial.print("[");
           Serial.print(buttonLabels[i]);
@@ -237,6 +241,22 @@ void toggleRelay(int index) {
   Serial.print(index + 1);
   Serial.print(": ");
   Serial.println(relayState[index] ? "ON" : "OFF");
+}
+
+// Group toggle: if any relay is on, turn all off; otherwise turn all on.
+void toggleAllRelays() {
+  bool anyOn = false;
+  for (int i = 0; i < 3; i++) if (relayState[i]) { anyOn = true; break; }
+  bool target = !anyOn;
+  for (int i = 0; i < 3; i++) {
+    relayState[i] = target;
+    digitalWrite(relayPins[i], target ? LOW : HIGH);
+  }
+  beepActive = true;
+  beepStartTime = millis();
+  tone(buzzerPin, 1000);
+  Serial.print("All relays: ");
+  Serial.println(target ? "ON" : "OFF");
 }
 
 // ============================================================
@@ -449,7 +469,7 @@ void updateDisplay() {
     displayFirstDraw = false;
     lastDrawnRpm = rpm;
     lastDrawnTemp = temperature;
-    for (int i = 0; i < 4; i++) lastDrawnRelay[i] = relayState[i];
+    for (int i = 0; i < 3; i++) lastDrawnRelay[i] = relayState[i];
     // Draw first frame of all sections (force all flags true)
     drawSections(true, true, true);
     return;
@@ -459,7 +479,7 @@ void updateDisplay() {
   bool rpmChanged   = (rpm != lastDrawnRpm) || (rpm > 0);  // gear always animates if rpm>0
   bool tempChanged   = (temperature != lastDrawnTemp);
   bool relayChanged  = false;
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 3; i++) {
     if (relayState[i] != lastDrawnRelay[i]) {
       relayChanged = true;
       break;
@@ -531,9 +551,9 @@ void drawSections(bool doRpm, bool doTemp, bool doRelay) {
 
     uint16_t onColor  = 0x07E0;   // Green
     uint16_t offColor = 0x7BEF;   // Dim gray
-    const char* relayLabels[] = {"R1", "R2", "R3", "R4"};
+    const char* relayLabels[] = {"R1", "R2", "R3"};
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 3; i++) {
       int col = i % 2;
       int row = i / 2;
       int x = 10 + col * 115;
