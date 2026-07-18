@@ -20,7 +20,7 @@
 const int relayPins[4] = {13, 12, 27, 26};
 
 // Button pins (INPUT_PULLUP mode: active-LOW, connect to GND when pressed)
-const int buttonPins[4] = {2, 4, 16, 17};  
+const int buttonPins[4] = {15, 4, 16, 17};  
 
 // Buzzer pin
 const int buzzerPin = 23;
@@ -73,9 +73,10 @@ Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 bool relayState[4] = {false, false, false, false};
 
 // Button state tracking
-int currentButtonState[4] = {HIGH, HIGH, HIGH, HIGH};
-int lastButtonState[4] = {HIGH, HIGH, HIGH, HIGH};
-unsigned long lastDebounceTime[4] = {0, 0, 0, 0};
+const char* buttonLabels[4] = {"S1", "S2", "S3", "S4"};
+int currentState[4] = {HIGH, HIGH, HIGH, HIGH};
+int lastState[4] = {HIGH, HIGH, HIGH, HIGH};
+unsigned long lastDebounce[4] = {0, 0, 0, 0};
 const unsigned long debounceDelay = 50;
 
 // Buzzer timing
@@ -191,36 +192,27 @@ void handleButtons() {
   for (int i = 0; i < 4; i++) {
     int reading = digitalRead(buttonPins[i]);
 
-    // If button state changed, reset debounce timer
-    if (reading != lastButtonState[i]) {
-      lastDebounceTime[i] = millis();
+    if (reading != lastState[i]) {
+      lastDebounce[i] = millis();
     }
 
-    // Check if enough time has passed for debouncing
-    if ((millis() - lastDebounceTime[i]) > debounceDelay) {
-      // If button state has actually changed
-      if (reading != currentButtonState[i]) {
-        currentButtonState[i] = reading;
-
-        // Print status based on button state
-        Serial.print("Button ");
-        Serial.print(i + 1);
-        Serial.print(" (Pin ");
-        Serial.print(buttonPins[i]);
-        Serial.print("): ");
-
-        if (currentButtonState[i] == LOW) {
-          // Button is pressed (connected to GND)
-          Serial.println("PRESSED");
+    if ((millis() - lastDebounce[i]) > debounceDelay) {
+      if (reading != currentState[i]) {
+        currentState[i] = reading;
+        if (currentState[i] == LOW) {
+          Serial.print("[");
+          Serial.print(buttonLabels[i]);
+          Serial.println("] PRESSED");
           toggleRelay(i);
         } else {
-          // Button is released (pulled HIGH by internal resistor)
-          Serial.println("RELEASED");
+          Serial.print("[");
+          Serial.print(buttonLabels[i]);
+          Serial.println("] RELEASED");
         }
       }
     }
 
-    lastButtonState[i] = reading;
+    lastState[i] = reading;
   }
 }
 
