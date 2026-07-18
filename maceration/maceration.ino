@@ -20,10 +20,10 @@
 // 3 relays — IN1, IN2, IN3. GPIO12 is intentionally avoided:
 // it's a strapping pin and the relay module's pull-up would prevent ESP32 boot.
 // Also disconnect GPIO12 from the relay module on the hardware side.
-const int relayPins[3] = {27, 26, 13};
+const int relayPins[3] = {13, 27, 26}; // IN1, IN2, IN3
 
 // Button pins (INPUT_PULLUP mode: active-LOW, connect to GND when pressed)
-const int buttonPins[4] = {15, 4, 16, 17};  
+const int buttonPins[4] = {16, 17, 15, 4};  // BTN1, BTN2, BTN3, BTN4 
 
 // Buzzer pin
 const int buzzerPin = 23;
